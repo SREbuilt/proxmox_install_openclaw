@@ -346,6 +346,113 @@ qm guest cmd 100 network-get-interfaces | jq -r '.[] | select(.name == "eth0") |
 
 ---
 
+## Network Interface (NIC) Management (from Proxmox host)
+
+### Hardware Info
+
+| Component | Details |
+|-----------|---------|
+| Built-in NICs | 4x Intel I226-V (`enp1s0`–`enp4s0`) |
+| USB NIC (removed) | Microsoft Surface Ethernet Adapter (`enxc0335eee4ac3`) |
+| Active bridge port | `enp1s0` (switched 2026-04-17) |
+
+### Query all interfaces
+
+```bash
+# List all interfaces with state
+ip link show
+
+# Show only physical NICs (no bridges, taps, loopback)
+ip link show | grep -E "^[0-9]+: en"
+
+# Show which PCI NICs are installed
+lspci | grep -i ethernet
+
+# Show USB NICs
+lsusb | grep -i net
+```
+
+### Check link status (cable connected?)
+
+NICs in `DOWN` state don't report link — bring them up first:
+
+```bash
+# Bring all built-in NICs up (needed to detect cable)
+for iface in enp1s0 enp2s0 enp3s0 enp4s0; do
+  ip link set $iface up
+done
+sleep 3
+
+# Check which port has a cable plugged in (1 = yes, 0 = no)
+for iface in enp1s0 enp2s0 enp3s0 enp4s0; do
+  echo "$iface: carrier=$(cat /sys/class/net/$iface/carrier 2>/dev/null || echo 'N/A')"
+done
+
+# Detailed link info for a specific NIC
+ethtool enp1s0 | grep -E "Speed|Duplex|Link detected"
+```
+
+### Check which NIC is used by the bridge
+
+```bash
+# Show bridge members
+bridge link show
+# or
+cat /etc/network/interfaces | grep bridge-ports
+```
+
+### Switch bridge to a different NIC
+
+> ⚠️ **Do this at the physical console (monitor + keyboard), not SSH!**
+> Changing the bridge port will drop network connectivity.
+
+```bash
+# 1. Backup current config
+cp /etc/network/interfaces /root/interfaces.backup
+
+# 2. Bring up the target NIC and verify link
+ip link set enp2s0 up
+sleep 2
+ethtool enp2s0 | grep "Link detected"  # Must say "yes"
+
+# 3. Switch bridge port (replace enp1s0 with new NIC)
+sed -i 's/enp1s0/enp2s0/g' /etc/network/interfaces
+
+# 4. Verify the change
+cat /etc/network/interfaces | grep -A5 vmbr0
+
+# 5. Reboot (safest method)
+reboot
+```
+
+### Rollback if network is broken
+
+At the physical console:
+
+```bash
+cp /root/interfaces.backup /etc/network/interfaces
+reboot
+```
+
+### Current network config (`/etc/network/interfaces`)
+
+```
+auto lo
+iface lo inet loopback
+
+iface enp1s0 inet manual
+
+auto vmbr0
+iface vmbr0 inet static
+        address 192.168.178.108/24
+        gateway 192.168.178.1
+        bridge-ports enp1s0
+        bridge-stp off
+        bridge-fd 0
+```
+
+---
+
 ## Troubleshooting
 
 ### Container won't start
