@@ -94,7 +94,7 @@ The script will:
 
 ```bash
 # From your workstation:
-ssh -L 18789:localhost:18789 openclaw@<VM_IP>
+ssh -L 18789:localhost:18789 claw@<VM_IP>
 
 # Then open in your browser:
 # http://localhost:18789
@@ -104,7 +104,7 @@ ssh -L 18789:localhost:18789 openclaw@<VM_IP>
 #### 5. Verify security
 
 ```bash
-ssh openclaw@<VM_IP>
+ssh claw@<VM_IP>
 docker compose exec openclaw-gateway node openclaw.mjs security audit --deep
 ```
 
@@ -217,9 +217,13 @@ pct exec <VMID> -- su - openclaw -c 'openclaw security audit --deep'
 │  ✓ Allow: internet (everything else)        │
 │  ✓ Inbound: SSH only from LAN              │
 ├─────────────────────────────────────────────┤
-│ In-Container/VM iptables (defense in depth) │
-│  ✓ Same rules as above, enforced inside     │
-│  ✓ Survives Proxmox firewall misconfiguration│
+│ In-Container/VM Hardening (defense in depth) │
+│  ✓ Docker cap_drop: NET_RAW, NET_ADMIN,      │
+│    SYS_ADMIN                                  │
+│  ✓ security_opt: no-new-privileges            │
+│  ✓ network_mode: host + loopback bind only    │
+│  Note: In-VM iptables removed (conflicts with │
+│  Docker). Proxmox firewall is sufficient.     │
 ├─────────────────────────────────────────────┤
 │ IPv6 Disabled                               │
 │  ✓ Prevents bypass of IPv4-only rules       │
@@ -227,11 +231,15 @@ pct exec <VMID> -- su - openclaw -c 'openclaw security audit --deep'
 │ OpenClaw Hardened Config                    │
 │  ✓ Gateway: loopback only                   │
 │  ✓ Auth: 256-bit random token               │
-│  ✓ Tools: deny automation/runtime/fs        │
-│  ✓ Exec: deny + always ask                  │
+│  ✓ Tools profile: "coding" (Skills nutzbar) │
+│  ✓ Exec: "full" with ask "off" (für Skills) │
+│  ✓ Deny: sessions_spawn, sessions_send      │
 │  ✓ Sessions: per-channel-peer isolation     │
 │  ✓ Elevated tools: disabled                 │
 │  ✓ FS: workspace-only                       │
+│  Note: Initial setup uses "messaging" profile│
+│  Upgrade to "coding" when adding Skills     │
+│  (see openclaw-home-assistant-integration.md)│
 ├─────────────────────────────────────────────┤
 │ OS-Level Hardening                          │
 │  ✓ Non-root service user                    │

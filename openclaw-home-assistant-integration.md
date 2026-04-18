@@ -443,7 +443,7 @@ IN ACCEPT -p icmp -log nolog
 
 ```bash
 # Prüfen
-docker compose exec openclaw-gateway env | grep -E "HA_|GRAFANA_"
+docker compose exec openclaw-gateway env | grep -E "HA_|GRAFANA_|TENNIS_"
 
 # Falls leer: docker-compose.yml prüfen
 grep -A2 env_file ~/openclaw/docker-compose.yml
@@ -503,9 +503,24 @@ Falls leer oder nicht vorhanden → Schritt 9 wiederholen.
 
 2. **Credentials** — In `~/.openclaw/.credentials.env` ergänzen
 
-3. **boot.md** — Integration beschreiben
+3. **Skill erstellen** — Neuen Skill-Ordner unter `~/.openclaw/workspace/skills/` anlegen:
+   ```bash
+   mkdir -p ~/.openclaw/workspace/skills/neuer-service/scripts
+   # SKILL.md mit Beschreibung + API-Referenz schreiben
+   # Optional: Script(s) für CLI-Zugriff
+   ```
 
-4. **Restart** — `docker compose restart openclaw-gateway`
+4. **boot.md** — Integration beschreiben (als Fallback, falls Skill nicht reicht)
+
+5. **Restart** — `cd ~/openclaw && docker compose down && docker compose up -d`
+
+### Neuen Internet-Service hinzufügen
+
+Kein Firewall-Thema — nur Skill + Credentials nötig:
+
+1. **Skill erstellen** mit SKILL.md + Scripts
+2. **Credentials** in `.credentials.env` (falls Login nötig)
+3. **Restart**
 
 ### Aktuell freigegebene Services
 
@@ -553,20 +568,27 @@ auf die öffentlichen Kalenderseiten zu.
 
 ### Einrichtung
 
-#### 1. Script auf die VM kopieren
+Der Tennis-Skill wurde als **lokaler Skill** im Workspace erstellt.
+
+#### 1. Skill-Verzeichnis erstellen (bereits erledigt)
 
 ```bash
-# Von deinem Rechner (wo das Script liegt):
-scp -i ~/.ssh/id_ed25519_openclaw tennis-booking.sh claw@192.168.178.80:~/
-
-# Auf der VM:
-ssh claw@192.168.178.80
-mkdir -p ~/.openclaw/bin
-mv ~/tennis-booking.sh ~/.openclaw/bin/tennis.sh
-chmod +x ~/.openclaw/bin/tennis.sh
+mkdir -p ~/.openclaw/workspace/skills/tennis-booking/scripts
 ```
 
-#### 2. Credentials in .credentials.env ergänzen
+#### 2. SKILL.md und Script wurden direkt im Skill-Ordner erstellt:
+
+```
+~/.openclaw/workspace/skills/tennis-booking/
+├── SKILL.md             ← Skill-Beschreibung mit ep-3 Referenz
+└── scripts/
+    └── tennis.sh        ← CLI: check, details, book
+```
+
+> **Nicht verwechseln** mit der alten Datei `~/.openclaw/bin/tennis.sh`.
+> Der Skill liegt unter `workspace/skills/tennis-booking/scripts/tennis.sh`.
+
+#### 3. Credentials in .credentials.env ergänzen
 
 ```bash
 cat >> ~/.openclaw/.credentials.env << 'EOF'
@@ -584,18 +606,19 @@ chmod 600 ~/.openclaw/.credentials.env
 > Gleiche E-Mail für beide Vereine möglich, Passwörter können
 > unterschiedlich sein.
 
-#### 3. boot.md aktualisieren
+#### 4. boot.md aktualisieren
 
 Ergänze in `~/.openclaw/boot.md`:
 
 ```markdown
-### Tennis-Platzbuchung
-- Script: /home/node/.openclaw/bin/tennis.sh
-- Vereine: kleinberghofen (2 Plätze), erdweg (6 Plätze)
+### Tennis-Platzbuchung (ep-3 Skill)
+- Skill: ~/.openclaw/workspace/skills/tennis-booking/
+- Script: tennis.sh (im Skill scripts/ Ordner)
+- Vereine: kb = Kleinberghofen (2 Plätze), er = Erdweg (6 Plätze)
 - Env-Vars: TENNIS_KB_EMAIL, TENNIS_KB_PASS, TENNIS_ER_EMAIL, TENNIS_ER_PASS
-- Verfügbarkeit: tennis.sh check [kleinberghofen|erdweg] [YYYY-MM-DD]
-- Details: tennis.sh details [verein] YYYY-MM-DD HH:MM PLATZ
-- Buchen: tennis.sh book [verein] YYYY-MM-DD HH:MM PLATZ
+- Verfügbarkeit: tennis.sh check [kb|er] [YYYY-MM-DD]
+- Details: tennis.sh details [kb|er] YYYY-MM-DD HH:MM PLATZ
+- Buchen: tennis.sh book [kb|er] YYYY-MM-DD HH:MM PLATZ
 - Internet-Seiten, kein Firewall-Thema
 ```
 
@@ -617,17 +640,17 @@ Beispiel-Befehle an den Bot:
 ### tennis.sh Referenz
 
 ```bash
-# Verfügbarkeit prüfen
-tennis.sh check kleinberghofen              # Heute
-tennis.sh check kleinberghofen 2026-04-20   # Bestimmtes Datum
-tennis.sh check erdweg                      # TC Erdweg, heute
+# Kurzformen: kb = Kleinberghofen, er = Erdweg
+tennis.sh check kb                  # Heute
+tennis.sh check kb 2026-04-20      # Bestimmtes Datum
+tennis.sh check er                  # TC Erdweg, heute
 
 # Slot-Details (wer hat gebucht?)
-tennis.sh details erdweg 2026-04-19 15:00 6
+tennis.sh details er 2026-04-19 15:00 6
 
 # Platz buchen (Login erforderlich)
-tennis.sh book kleinberghofen 2026-04-20 18:00 1
-tennis.sh book erdweg 2026-04-20 18:00 3
+tennis.sh book kb 2026-04-20 18:00 1
+tennis.sh book er 2026-04-20 18:00 3
 ```
 
 ### ep-3 System Details
@@ -649,9 +672,8 @@ tennis.sh book erdweg 2026-04-20 18:00 3
 ```bash
 # Script direkt im Container testen
 docker compose exec openclaw-gateway bash -c \
-  'source /home/node/.openclaw/.credentials.env && \
-   export PATH="/home/node/.openclaw/bin:$PATH" && \
-   /home/node/.openclaw/bin/tennis.sh check kleinberghofen'
+  'export PATH="/home/node/.openclaw/bin:$PATH" && \
+   /home/node/.openclaw/workspace/skills/tennis-booking/scripts/tennis.sh check kb'
 
 # Manuell prüfen ob die Seite erreichbar ist
 docker compose exec openclaw-gateway curl -sf \

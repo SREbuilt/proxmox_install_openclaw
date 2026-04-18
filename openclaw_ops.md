@@ -15,6 +15,9 @@
 | Docker container management | VM SSH session (`~/openclaw`) |
 | OpenClaw CLI commands | Inside the container via `docker compose exec` |
 | Dashboard access | SSH tunnel from workstation |
+| Skills verwalten | VM SSH session (`~/.openclaw/workspace/skills/`) |
+| Credentials bearbeiten | VM SSH session (`~/.openclaw/.credentials.env`) |
+| Integrationen (HA, Tennis) | Siehe `openclaw-home-assistant-integration.md` |
 
 ---
 
@@ -450,6 +453,115 @@ iface vmbr0 inet static
         bridge-stp off
         bridge-fd 0
 ```
+
+---
+
+## Skills (Integrationen)
+
+OpenClaw nutzt **Skills** zur Integration externer Dienste. Skills sind
+Ordner mit einer `SKILL.md`-Datei im Workspace-Verzeichnis.
+
+> Vollständige Dokumentation: siehe `openclaw-home-assistant-integration.md`
+
+### Installierte Skills
+
+| Skill | Verzeichnis | Funktion |
+|-------|-------------|----------|
+| 🏠 `home-assistant` | `~/.openclaw/workspace/skills/home-assistant/` | Smart Home steuern |
+| 🎾 `tennis-booking` | `~/.openclaw/workspace/skills/tennis-booking/` | Tennisplatz-Buchung |
+
+### Skills auflisten
+
+```bash
+ls ~/.openclaw/workspace/skills/
+```
+
+### Skill von ClawHub installieren
+
+```bash
+docker compose exec openclaw-gateway node openclaw.mjs skills install <SKILL_NAME>
+docker compose restart openclaw-gateway
+```
+
+### Eigenen Skill erstellen
+
+```bash
+# 1. Ordner anlegen
+mkdir -p ~/.openclaw/workspace/skills/mein-skill/scripts
+
+# 2. SKILL.md erstellen (Frontmatter + Doku)
+cat > ~/.openclaw/workspace/skills/mein-skill/SKILL.md << 'EOF'
+---
+name: mein-skill
+description: Beschreibung wann der Skill genutzt werden soll.
+metadata: {"clawdbot":{"emoji":"🔧","requires":{"bins":["curl"]}}}
+---
+# Mein Skill
+Dokumentation, Beispiele, CLI-Referenz...
+EOF
+
+# 3. Optional: Script(s) erstellen
+cat > ~/.openclaw/workspace/skills/mein-skill/scripts/mein-script.sh << 'SCRIPT'
+#!/usr/bin/env bash
+export PATH="/home/node/.openclaw/bin:$PATH"
+set -euo pipefail
+echo "Hello from mein-skill!"
+SCRIPT
+chmod +x ~/.openclaw/workspace/skills/mein-skill/scripts/mein-script.sh
+
+# 4. Gateway neustarten
+cd ~/openclaw && docker compose restart openclaw-gateway
+```
+
+> **Wichtig:** Die `description` im SKILL.md-Frontmatter bestimmt, wann
+> OpenClaw den Skill erkennt und nutzt. Formuliere sie so, dass die
+> relevanten Schlüsselwörter enthalten sind.
+
+### Skill löschen
+
+```bash
+rm -rf ~/.openclaw/workspace/skills/<SKILL_NAME>
+docker compose restart openclaw-gateway
+```
+
+---
+
+## Credentials-Management
+
+Alle Zugangsdaten liegen in einer einzigen Datei:
+
+```bash
+# Datei anzeigen
+cat ~/.openclaw/.credentials.env
+
+# Datei bearbeiten
+nano ~/.openclaw/.credentials.env
+
+# Nach Änderungen: Container MÜSSEN neu starten
+cd ~/openclaw && docker compose down && docker compose up -d
+```
+
+### Aktuelle Variablen
+
+| Variable | Dienst | Beschreibung |
+|----------|--------|-------------|
+| `HA_URL` | Home Assistant | API-URL (http://192.168.178.88:8123) |
+| `HA_TOKEN` | Home Assistant | Long-Lived Access Token (JWT) |
+| `GRAFANA_URL` | Grafana | Dashboard-URL |
+| `TENNIS_KB_EMAIL` | TC Kleinberghofen | Login E-Mail |
+| `TENNIS_KB_PASS` | TC Kleinberghofen | Login Passwort |
+| `TENNIS_ER_EMAIL` | TC Erdweg | Login E-Mail |
+| `TENNIS_ER_PASS` | TC Erdweg | Login Passwort |
+
+### Prüfen ob Variablen im Container ankommen
+
+```bash
+docker compose exec openclaw-gateway env | grep -E "HA_|GRAFANA_|TENNIS_"
+```
+
+> ⚠️ `source ~/.openclaw/.credentials.env` lädt die Vars nur in die
+> Shell, nicht in den Docker-Container! Für den Container zählt nur
+> das `env_file` in `docker-compose.yml` + Restart.
 
 ---
 
