@@ -254,17 +254,182 @@ pct exec <VMID> -- su - openclaw -c 'openclaw security audit --deep'
 
 ## Which Option to Choose?
 
-| Factor | VM | LXC |
-|-|-|-|
-| **Isolation** | ★★★★★ Hypervisor | ★★★★ Kernel namespaces |
-| **RAM overhead** | ~200MB for OS | ~100MB for OS |
-| **Desktop/GUI** | No (headless) | Yes (noVNC + LXQt) |
-| **Chrome browser** | No | Yes (with sandbox) |
-| **Setup complexity** | Simpler (Docker) | More components |
-| **Best for** | Headless AI gateway | Interactive setup/browsing |
+| Factor | OpenClaw VM | OpenClaw LXC | Hermes VM |
+|-|-|-|-|
+| **Isolation** | ★★★★★ Hypervisor | ★★★★ Kernel NS | ★★★★★ Hypervisor |
+| **RAM** | 4 GB | 3 GB | 3 GB |
+| **Desktop/GUI** | No (headless) | Yes (noVNC) | Dashboard (web) |
+| **Browser** | No | Yes (Chrome) | Optional |
+| **Setup** | Script (fire&forget) | Script | Script (fire&forget) |
+| **Skills** | SKILL.md + ClawHub | SKILL.md + ClawHub | Auto-generated |
+| **Memory** | Session hooks | Session hooks | Persistent (auto) |
+| **Open Source** | No | No | Yes (MIT) |
+| **Best for** | Proven gateway | Desktop setup | Open-source alternative |
 
 **Recommendation**: Use VM if you only need the API gateway. Use LXC if you
 want the desktop experience for onboarding and browser-based channel setup.
+
+---
+
+## Option 3: Hermes Agent VM (Alternative to OpenClaw)
+
+**Best for**: Side-by-side comparison with OpenClaw. Hermes Agent by Nous
+Research is an open-source (MIT) autonomous agent with persistent memory,
+auto-generated skills, and scheduled automations.
+
+| Aspekt | OpenClaw (VM 100) | Hermes Agent (VM 101) |
+|--------|-------------------|----------------------|
+| Hersteller | OpenClaw | Nous Research |
+| Lizenz | Proprietary | MIT (Open Source) |
+| LLM Provider | Z.AI (nativ) | Z.AI (GLM_API_KEY) |
+| Model | zai/glm-4.7 | zai/glm-4.7 |
+| Docker Image | ghcr.io/openclaw/openclaw | nousresearch/hermes-agent |
+| Gateway Port | 18789 | 8642 |
+| Dashboard Port | — (gleicher Port) | 9119 |
+| VM IP | 192.168.178.80 | 192.168.178.81 |
+| RAM | 4 GB | 3 GB |
+| Channels | Telegram, WhatsApp, etc. | Telegram, Discord, Slack, etc. |
+| Skills | Workspace-basiert (SKILL.md) | Auto-generiert + installierbar |
+| Memory | Hooks + Session-Memory | Persistent (MEMORY.md, USER.md) |
+| Sandbox | Docker cap_drop | Local/Docker/SSH/Modal/Singularity |
+| Whisper/Audio | Lokaler Whisper Container | Nicht integriert (separat) |
+
+### Prerequisites
+- Proxmox VE 8.x+ with root access
+- SSH public key on the Proxmox host
+- Z.AI API key
+- Optional: Telegram bot token, HA long-lived token
+
+### Step-by-Step
+
+#### 1. Copy the script to your Proxmox host
+
+```bash
+scp setup-hermes-vm.sh root@<PROXMOX_IP>:/root/
+ssh root@<PROXMOX_IP>
+
+# Install jq if not already:
+apt install -y jq
+
+chmod +x /root/setup-hermes-vm.sh
+sed -i 's/\r$//' /root/setup-hermes-vm.sh
+```
+
+#### 2. Run the setup (fire and forget)
+
+```bash
+./setup-hermes-vm.sh \
+    --zai-api-key "your-zai-api-key" \
+    --ssh-pubkey ~/.ssh/id_ed25519.pub \
+    --ha-token "your-ha-long-lived-token"
+```
+
+With Telegram:
+```bash
+./setup-hermes-vm.sh \
+    --zai-api-key "your-zai-api-key" \
+    --ssh-pubkey ~/.ssh/id_ed25519.pub \
+    --ha-token "your-ha-long-lived-token" \
+    --telegram-token "your-telegram-bot-token"
+```
+
+The script will:
+- Download Debian 12 cloud image (cached, shared with OpenClaw)
+- Create VM 101 with 3GB RAM, 2 cores, 16GB disk
+- Configure Proxmox firewall (blocks LAN, allows HA + Grafana + internet)
+- Deploy Hermes via Docker Compose (gateway + dashboard)
+- Disable IPv6 (prevent firewall bypass)
+- Enable NIC firewall after setup completes
+- Wait for health check
+
+#### 3. Access Hermes (via SSH tunnel)
+
+```bash
+# From your workstation:
+ssh -L 8642:localhost:8642 -L 9119:localhost:9119 hermes@192.168.178.81
+
+# Dashboard: http://localhost:9119
+# Gateway API: http://localhost:8642
+```
+
+From Windows:
+```powershell
+ssh -i C:\Users\bvogel\.ssh\id_ed25519_openclaw ^
+    -L 8642:localhost:8642 -L 9119:localhost:9119 ^
+    hermes@192.168.178.81
+```
+
+#### 4. Configure Telegram (if not set during setup)
+
+```bash
+ssh hermes@192.168.178.81
+nano ~/.hermes/.env
+# Add: TELEGRAM_BOT_TOKEN=your-token
+cd ~/hermes && docker compose restart hermes
+```
+
+#### 5. Verify security
+
+```bash
+# Internet works
+ssh hermes@192.168.178.81 "curl -sf --max-time 5 https://cloud.debian.org > /dev/null && echo INTERNET_OK"
+
+# HA accessible
+ssh hermes@192.168.178.81 "curl -sf --max-time 5 http://192.168.178.88:8123/api/ && echo HA_OK"
+
+# Rest of LAN blocked
+ssh hermes@192.168.178.81 "curl -sf --max-time 3 http://192.168.178.108:8006 2>/dev/null && echo LAN_EXPOSED || echo LAN_BLOCKED"
+```
+
+### Hermes Directory Structure
+
+```
+~/.hermes/
+├── .env            ← API keys (GLM_API_KEY, HA_TOKEN, TELEGRAM_BOT_TOKEN)
+├── config.yaml     ← Settings (model, terminal, memory, tools)
+├── SOUL.md         ← Agent personality/identity
+├── memories/       ← Persistent memory (auto-managed)
+├── skills/         ← Agent-created skills
+├── sessions/       ← Conversation history
+├── cron/           ← Scheduled jobs
+├── hooks/          ← Event hooks
+└── logs/           ← Runtime logs
+```
+
+### Hermes CLI (inside VM)
+
+```bash
+# Interactive chat
+cd ~/hermes && docker compose exec -it hermes hermes
+
+# View config
+docker compose exec hermes hermes config
+
+# Set a value
+docker compose exec hermes hermes config set model zai/glm-5.1
+
+# Health check
+curl -sf http://127.0.0.1:8642/health
+
+# Logs
+docker compose logs --tail 50 hermes
+docker compose logs --tail 20 hermes-dashboard
+```
+
+### Hermes Maintenance
+
+```bash
+# Update Hermes
+cd ~/hermes
+docker compose pull
+docker compose up -d
+
+# Restart
+docker compose restart hermes
+
+# Backup (.hermes contains all state)
+tar czf ~/hermes-backup-$(date +%Y%m%d).tar.gz ~/.hermes/
+```
 
 ---
 
@@ -278,16 +443,19 @@ After setup, configure your messaging channels:
 ## Maintenance
 
 ```bash
-# Update OpenClaw (VM):
-ssh openclaw@<VM_IP> 'docker compose pull && docker compose up -d'
+# Update OpenClaw (VM 100):
+ssh claw@192.168.178.80 'cd ~/openclaw && docker compose pull && docker compose up -d'
+
+# Update Hermes (VM 101):
+ssh hermes@192.168.178.81 'cd ~/hermes && docker compose pull && docker compose up -d'
 
 # Update OpenClaw (LXC):
 pct exec <VMID> -- npm update -g openclaw
 
-# Security audit:
-openclaw security audit --deep
+# Security audit (OpenClaw):
+ssh claw@192.168.178.80 'cd ~/openclaw && docker compose exec openclaw-gateway node openclaw.mjs security audit --deep'
 
 # Check services:
-systemctl status openclaw-gateway  # LXC
-docker compose ps                   # VM
+ssh claw@192.168.178.80 'cd ~/openclaw && docker compose ps'      # OpenClaw
+ssh hermes@192.168.178.81 'cd ~/hermes && docker compose ps'       # Hermes
 ```

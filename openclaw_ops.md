@@ -5,6 +5,18 @@
 > in the `~/openclaw` directory. OpenClaw is installed inside the Docker
 > container, not on the VM host.
 
+### Proxmox VM-Übersicht
+
+| VM | Name | IP | RAM | Funktion |
+|----|------|----|-----|----------|
+| 100 | openclaw | 192.168.178.80 | 4 GB | OpenClaw AI Assistant |
+| 101 | hermes-agent | 192.168.178.81 | 3 GB | Hermes AI Agent |
+| 108 | home-assistant | 192.168.178.88 | 6 GB | Home Assistant (prod) |
+| 109 | ha-backup | 192.168.178.x | 1.5 GB | Home Assistant (backup) |
+
+> Für Hermes-spezifische Dokumentation: siehe `SETUP-GUIDE.md`, Option 3.
+> container, not on the VM host.
+
 ---
 
 ## Quick Reference
