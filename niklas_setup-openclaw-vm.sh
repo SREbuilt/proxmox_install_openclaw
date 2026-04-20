@@ -5,9 +5,9 @@
 # Strategy (same as proven Hermes v8 script):
 #   Phase 1: Proxmox-native cloud-init (user, SSH key, password, IP)
 #   Phase 2: Wait for boot (handle first-boot kernel panic automatically)
-#   Phase 3: SSH into VM → install Docker → deploy OpenClaw + Whisper
+#   Phase 3: SSH into VM → install Docker → deploy OpenClaw
 #
-# Includes: Z.AI GLM provider, Telegram, Whisper voice transcription,
+# Includes: Z.AI GLM provider, Telegram, shared Whisper (LXC 102),
 #   Home Assistant + Grafana firewall whitelist, hardened tool config
 #
 # Usage:
@@ -45,6 +45,9 @@ HA_IP="192.168.178.88"
 HA_PORT="8123"
 GRAFANA_IP="192.168.178.98"
 GRAFANA_PORT="443"
+
+WHISPER_IP="192.168.178.82"
+WHISPER_PORT="8000"
 
 CLOUD_IMG_URL="https://cloud.debian.org/images/cloud/bookworm/latest/debian-12-generic-amd64.qcow2"
 CLOUD_IMG_PATH="/var/lib/vz/template/iso/debian-12-generic-amd64.qcow2"
@@ -200,6 +203,7 @@ OUT ACCEPT -d ${GATEWAY}/32 -p udp -dport 53 -log nolog
 OUT ACCEPT -d ${GATEWAY}/32 -p tcp -dport 53 -log nolog
 OUT ACCEPT -dest ${HA_IP} -dport ${HA_PORT} -p tcp -log nolog
 OUT ACCEPT -dest ${GRAFANA_IP} -dport ${GRAFANA_PORT} -p tcp -log nolog
+OUT ACCEPT -dest ${WHISPER_IP} -dport ${WHISPER_PORT} -p tcp -log nolog
 OUT DROP -d 10.0.0.0/8 -log nolog
 OUT DROP -d 172.16.0.0/12 -log nolog
 OUT DROP -d 192.168.0.0/16 -log nolog
@@ -366,22 +370,6 @@ services:
       TERM: xterm-256color
     env_file:
       - /home/claw/.openclaw/.credentials.env
-  whisper:
-    image: fedirz/faster-whisper-server:latest-cpu
-    container_name: openclaw-whisper
-    restart: unless-stopped
-    network_mode: host
-    environment:
-      - WHISPER__MODEL=small
-      - WHISPER__INFERENCE_DEVICE=cpu
-      - UVICORN_HOST=127.0.0.1
-      - UVICORN_PORT=8000
-    healthcheck:
-      test: ["CMD", "curl", "-sf", "http://127.0.0.1:8000/health"]
-      interval: 30s
-      timeout: 10s
-      retries: 3
-      start_period: 60s
 COMPOSE_EOF
 ok "  docker-compose.yml written"
 
@@ -437,7 +425,7 @@ $SSH_CMD "${USER}@${VM_IP}" "cat > ~/.openclaw/openclaw.json" << OCJSON_EOF
         "models": [{
           "type": "cli",
           "command": "curl",
-          "args": ["-sf", "-X", "POST", "http://127.0.0.1:8000/v1/audio/transcriptions", "-F", "file=@{{MediaPath}}", "-F", "model=Systran/faster-whisper-small", "-F", "response_format=text", "-F", "language=de"],
+          "args": ["-sf", "-X", "POST", "http://192.168.178.82:8000/v1/audio/transcriptions", "-F", "file=@{{MediaPath}}", "-F", "model=Systran/faster-whisper-small", "-F", "response_format=text", "-F", "language=de"],
           "timeoutSeconds": 60
         }]
       }
@@ -591,7 +579,7 @@ echo "  SSH:            ssh ${USER}@${VM_IP}"
 echo ""
 echo "  Gateway:        http://127.0.0.1:18789 (via SSH tunnel)"
 echo "  Gateway Token:  $GATEWAY_TOKEN"
-echo "  Whisper:        http://127.0.0.1:8000 (local)"
+echo "  Whisper:        http://192.168.178.82:8000 (shared LXC 102)"
 echo ""
 echo "  SSH Tunnel (from Windows):"
 echo "    ssh -i C:\\Users\\bvogel\\.ssh\\id_ed25519_openclaw \\"
@@ -606,12 +594,13 @@ echo ""
 echo "  Firewall:"
 echo "    ✅ ${HA_IP}:${HA_PORT} (Home Assistant)"
 echo "    ✅ ${GRAFANA_IP}:${GRAFANA_PORT} (Grafana)"
+echo "    ✅ ${WHISPER_IP}:${WHISPER_PORT} (Whisper LXC)"
 echo "    ❌ Rest of 192.168.178.0/24"
 echo "    ✅ Internet"
 echo ""
 echo "  Model:          zai/glm-4.7 (Z.AI)"
 echo "  Tools:          coding profile, exec full, elevated disabled"
-echo "  Whisper:        small model, German, CLI-based"
+echo "  Whisper:        shared LXC 102, small model, German"
 echo ""
 echo -e "${GREEN}═══════════════════════════════════════════════════${NC}"
 echo -e "${YELLOW}  ⚠️  SAVE the password: ${PASSWORD}${NC}"

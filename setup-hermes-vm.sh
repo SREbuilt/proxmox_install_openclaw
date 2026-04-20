@@ -52,6 +52,9 @@ HA_PORT="8123"
 GRAFANA_IP="192.168.178.98"
 GRAFANA_PORT="443"
 
+WHISPER_IP="192.168.178.82"
+WHISPER_PORT="8000"
+
 CLOUD_IMG_URL="https://cloud.debian.org/images/cloud/bookworm/latest/debian-12-generic-amd64.qcow2"
 CLOUD_IMG_PATH="/var/lib/vz/template/iso/debian-12-generic-amd64.qcow2"
 
@@ -205,6 +208,7 @@ OUT ACCEPT -d ${GATEWAY}/32 -p udp -dport 53 -log nolog
 OUT ACCEPT -d ${GATEWAY}/32 -p tcp -dport 53 -log nolog
 OUT ACCEPT -dest ${HA_IP} -dport ${HA_PORT} -p tcp -log nolog
 OUT ACCEPT -dest ${GRAFANA_IP} -dport ${GRAFANA_PORT} -p tcp -log nolog
+OUT ACCEPT -dest ${WHISPER_IP} -dport ${WHISPER_PORT} -p tcp -log nolog
 OUT DROP -d 10.0.0.0/8 -log nolog
 OUT DROP -d 172.16.0.0/12 -log nolog
 OUT DROP -d 192.168.0.0/16 -log nolog
