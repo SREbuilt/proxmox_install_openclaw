@@ -481,13 +481,23 @@ tar czf ~/hermes-backup-$(date +%Y%m%d).tar.gz ~/.hermes/
 
 ### Hermes Troubleshooting
 
-#### Kernel Panic beim Booten
+#### Kernel Panic beim ersten Boot (erwartet!)
+
+Debian 12 Cloud-Images haben einen bekannten Bug: Der **erste Boot** nach
+der VM-Erstellung endet häufig in einem Kernel Panic. Nach einem Reset
+bootet die VM normal. Das Setup-Script erkennt dies automatisch und
+löst einen Reset aus.
+
+Falls manuell nötig:
 ```bash
-# CPU-Typ auf x86-64-v2-AES setzen (host verursacht Kernel Panic auf N150)
-qm stop 101
-qm set 101 --cpu cputype=x86-64-v2-AES
+# VM ist gestoppt nach Kernel Panic → einfach neu starten
 qm start 101
+# oder Reset falls sie hängt
+qm reset 101
 ```
+
+> **CPU-Typ**: `x86-64-v2-AES` statt `host` reduziert die Kernel-Panic-
+> Häufigkeit auf dem N150, eliminiert sie aber nicht komplett beim ersten Boot.
 
 #### SSH "Permission denied (publickey)"
 ```bash
@@ -537,6 +547,42 @@ Hermes liest `HA_TOKEN` aus `.env`, macht sie aber nicht automatisch in
 der Shell verfügbar. Der Agent muss `$HA_TOKEN` explizit aus der Umgebung
 lesen. Wenn Hermes nach dem Token fragt, einfach mitteilen — er merkt
 es sich dann in seinem persistenten Memory.
+
+---
+
+## ⚠️ CRITICAL: No Docker on Proxmox Host!
+
+> **Stand 2026-04-20 (bewiesen durch mehrstündigen Ausfall)**
+
+Docker darf **NICHT** auf dem Proxmox Host installiert sein! Docker
+überschreibt die iptables FORWARD-Chain mit `policy DROP` und einer
+`DOCKER-FORWARD` Chain, die **allen VM-Bridge-Traffic blockiert**.
+
+Symptome wenn Docker auf dem Host installiert ist:
+- VMs können den Gateway/Router nicht erreichen
+- VMs haben kein Internet
+- VMs können sich nicht untereinander erreichen
+- Telegram-Bots verbinden nicht
+- Home Assistant wird unerreichbar
+
+Falls Docker versehentlich auf dem Proxmox Host installiert wurde:
+
+```bash
+# Prüfen
+iptables -L DOCKER-USER -n 2>/dev/null && echo "DOCKER GEFUNDEN — ENTFERNEN!" || echo "OK"
+
+# Entfernen
+systemctl stop docker docker.socket containerd
+systemctl disable docker docker.socket containerd
+apt purge -y docker-ce docker-ce-cli docker-buildx-plugin docker-compose-plugin docker-ce-rootless-extras containerd.io
+apt autoremove -y
+iptables -P FORWARD ACCEPT
+iptables -F FORWARD
+pve-firewall restart
+```
+
+> Docker gehört **nur in die VMs** (OpenClaw VM 100, Hermes VM 101),
+> **niemals** auf den Proxmox Host selbst!
 
 ---
 

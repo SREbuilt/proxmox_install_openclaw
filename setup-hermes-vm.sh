@@ -2,39 +2,30 @@
 ###############################################################################
 # setup-hermes-vm.sh — Fire-and-forget Hermes Agent VM on Proxmox
 #
-# Creates a hardened Debian 12 VM with Docker, deploys Hermes Agent
-# (nousresearch/hermes-agent) with Z.AI as LLM provider, Telegram channel,
-# and secured network access to Home Assistant + Grafana.
+# Strategy (proven through 5 iterations):
+#   Phase 1: Proxmox-native cloud-init (user, SSH key, password, IP)
+#            NO cicustom — avoids all YAML/heredoc/permission issues
+#   Phase 2: Wait for boot (handle first-boot kernel panic automatically)
+#   Phase 3: SSH into VM → install Docker → deploy Hermes → patch config
+#
+# Known issues addressed:
+#   - First boot kernel panic on N150 (auto-reset)
+#   - cicustom breaks password auth (use native ciuser/cipassword instead)
+#   - .env newline issues (write via SSH cat, not heredoc)
+#   - Docker changes file ownership (chmod 777 on .hermes/)
+#   - Model format: "glm-4.7" not "zai/glm-4.7" or "openai/glm-4.7"
+#   - CPU type: x86-64-v2-AES (host causes kernel panic on N150)
 #
 # Usage:
 #   ./setup-hermes-vm.sh \
-#       --zai-api-key "YOUR_ZAI_KEY" \
-#       --ssh-pubkey ~/.ssh/id_ed25519.pub
+#       --zai-api-key "KEY" --ssh-pubkey ~/.ssh/id_ed25519.pub
 #
-# Optional flags:
-#       --vm-id 101                    (default: 101)
-#       --vm-ip 192.168.178.81         (default: 192.168.178.81)
-#       --gateway 192.168.178.1        (default: 192.168.178.1)
-#       --ram 3072                     (MB, default: 3072)
-#       --disk 16                      (GB, default: 16)
-#       --bridge vmbr0                 (default: vmbr0)
-#       --telegram-token "BOT_TOKEN"   (optional, configure later)
-#       --ha-token "HA_LONG_LIVED_TOK" (optional, for HA integration)
-#       --user hermes                  (default: hermes)
-#       --password ""                  (auto-generated if empty)
+# Optional:
+#       --vm-id 101  --vm-ip 192.168.178.81  --gateway 192.168.178.1
+#       --ram 3072   --disk 100  --bridge vmbr0  --user hermes
+#       --telegram-token "TOKEN"  --ha-token "TOKEN"  --password "PASS"
 #
-# Prerequisites:
-#   - Proxmox VE 8.x+ with root access
-#   - jq installed: apt install -y jq
-#   - SSH key pair on the Proxmox host
-#
-# Network security:
-#   - Proxmox firewall blocks all LAN except HA + Grafana
-#   - Internet access allowed (for Z.AI API)
-#   - SSH inbound from LAN only
-#
-# Author: Copilot CLI + bvogel
-# Date: 2026-04-19
+# Prerequisites: Proxmox VE 8.x+, jq, SSH key pair
 ###############################################################################
 
 set -euo pipefail
@@ -45,7 +36,7 @@ VM_ID=101
 VM_IP="192.168.178.81"
 GATEWAY="192.168.178.1"
 RAM=3072
-DISK=16
+DISK=100
 BRIDGE="vmbr0"
 USER="hermes"
 PASSWORD=""
@@ -56,7 +47,6 @@ HA_TOKEN=""
 HA_URL="http://192.168.178.88:8123"
 GRAFANA_URL="https://192.168.178.98/proxy/grafana"
 
-# HA + Grafana IPs for firewall whitelist
 HA_IP="192.168.178.88"
 HA_PORT="8123"
 GRAFANA_IP="192.168.178.98"
@@ -64,7 +54,6 @@ GRAFANA_PORT="443"
 
 CLOUD_IMG_URL="https://cloud.debian.org/images/cloud/bookworm/latest/debian-12-generic-amd64.qcow2"
 CLOUD_IMG_PATH="/var/lib/vz/template/iso/debian-12-generic-amd64.qcow2"
-SNIPPET_STORAGE="local"
 
 # ─── Colors ──────────────────────────────────────────────────────────────────
 
@@ -100,34 +89,35 @@ done
 
 [[ -z "$ZAI_KEY" ]] && fail "Missing --zai-api-key"
 [[ -z "$SSH_PUBKEY_FILE" ]] && fail "Missing --ssh-pubkey"
-[[ ! -f "$SSH_PUBKEY_FILE" ]] && fail "SSH pubkey file not found: $SSH_PUBKEY_FILE"
+[[ ! -f "$SSH_PUBKEY_FILE" ]] && fail "SSH pubkey not found: $SSH_PUBKEY_FILE"
 command -v jq &>/dev/null || fail "jq not installed. Run: apt install -y jq"
-command -v qm &>/dev/null || fail "Must run on a Proxmox host (qm not found)"
+command -v qm &>/dev/null || fail "Must run on a Proxmox host"
 
-SSH_PUBKEY=$(cat "$SSH_PUBKEY_FILE")
 [[ -z "$PASSWORD" ]] && PASSWORD=$(openssl rand -base64 12)
+
+# Remove old known_hosts entry
+ssh-keygen -f "$HOME/.ssh/known_hosts" -R "$VM_IP" 2>/dev/null || true
+
+SSH_CMD="ssh -o StrictHostKeyChecking=accept-new -o ConnectTimeout=10 -o BatchMode=yes"
 
 info "═══════════════════════════════════════════════════"
 info "  Hermes Agent VM Setup — Fire & Forget"
 info "═══════════════════════════════════════════════════"
 info "  VM ID:     $VM_ID"
 info "  VM IP:     $VM_IP"
-info "  RAM:       ${RAM}MB"
-info "  Disk:      ${DISK}GB"
-info "  User:      $USER"
-info "  Bridge:    $BRIDGE"
-info "  Gateway:   $GATEWAY"
+info "  RAM:       ${RAM}MB  Disk: ${DISK}GB"
+info "  User:      $USER  Password: $PASSWORD"
+info "  CPU:       x86-64-v2-AES"
 info "  Z.AI:      ${ZAI_KEY:0:8}..."
-info "  Telegram:  ${TELEGRAM_TOKEN:+configured}${TELEGRAM_TOKEN:-not set}"
-info "  HA Token:  ${HA_TOKEN:+configured}${HA_TOKEN:-not set}"
+info "  Telegram:  ${TELEGRAM_TOKEN:+configured}${TELEGRAM_TOKEN:-(not set)}"
+info "  HA Token:  ${HA_TOKEN:+configured}${HA_TOKEN:-(not set)}"
 info "═══════════════════════════════════════════════════"
 
 ###############################################################################
-# Step 1: Download Debian cloud image (cached)
+# Step 1/8: Download Debian cloud image
 ###############################################################################
 
-info "Step 1/7: Downloading Debian 12 cloud image..."
-
+info "Step 1/8: Downloading Debian 12 cloud image..."
 if [[ -f "$CLOUD_IMG_PATH" ]]; then
     ok "Cloud image already cached"
 else
@@ -136,13 +126,13 @@ else
 fi
 
 ###############################################################################
-# Step 2: Create VM
+# Step 2/8: Create VM
 ###############################################################################
 
-info "Step 2/7: Creating VM $VM_ID..."
+info "Step 2/8: Creating VM $VM_ID..."
 
 if qm status "$VM_ID" &>/dev/null; then
-    warn "VM $VM_ID already exists — destroying it"
+    warn "VM $VM_ID exists — destroying"
     qm stop "$VM_ID" --skiplock 2>/dev/null || true
     sleep 3
     qm destroy "$VM_ID" --purge 2>/dev/null || true
@@ -161,245 +151,38 @@ qm create "$VM_ID" \
     --agent enabled=1 \
     --onboot 1
 
-# Import disk
 qm importdisk "$VM_ID" "$CLOUD_IMG_PATH" local-lvm --format raw >/dev/null
 qm set "$VM_ID" --scsi0 "local-lvm:vm-${VM_ID}-disk-0,discard=on,ssd=1"
 qm set "$VM_ID" --boot order=scsi0
 qm resize "$VM_ID" scsi0 "${DISK}G"
-
-# Cloud-init drive
 qm set "$VM_ID" --ide2 "local-lvm:cloudinit"
 
-ok "VM $VM_ID created"
+ok "VM $VM_ID created (${DISK}GB disk, x86-64-v2-AES CPU)"
 
 ###############################################################################
-# Step 3: Cloud-init configuration
+# Step 3/8: Proxmox-native cloud-init (NO cicustom!)
 ###############################################################################
 
-info "Step 3/7: Configuring cloud-init..."
+info "Step 3/8: Configuring cloud-init (native Proxmox)..."
 
-# Ensure snippets directory exists
-SNIPPET_DIR="/var/lib/vz/snippets"
-mkdir -p "$SNIPPET_DIR"
-
-# Generate gateway auth token
-GW_TOKEN=$(openssl rand -hex 24)
-
-# Create cloud-init userdata with Docker install + Hermes setup
-cat > "${SNIPPET_DIR}/hermes-${VM_ID}-userdata.yaml" << USERDATA
-#cloud-config
-hostname: hermes
-manage_etc_hosts: true
-locale: en_US.UTF-8
-timezone: Europe/Berlin
-
-users:
-  - name: ${USER}
-    groups: [sudo, docker]
-    shell: /bin/bash
-    sudo: ALL=(ALL) NOPASSWD:ALL
-    lock_passwd: false
-    passwd: $(openssl passwd -6 "${PASSWORD}")
-    ssh_authorized_keys:
-      - ${SSH_PUBKEY}
-
-package_update: true
-package_upgrade: true
-
-packages:
-  - curl
-  - ca-certificates
-  - gnupg
-  - jq
-  - qemu-guest-agent
-  - unattended-upgrades
-
-write_files:
-  # Docker Compose for Hermes Agent
-  - path: /home/${USER}/hermes/docker-compose.yml
-    owner: ${USER}:${USER}
-    permissions: '0644'
-    content: |
-      services:
-        hermes:
-          image: nousresearch/hermes-agent:latest
-          container_name: hermes
-          restart: unless-stopped
-          command: gateway run
-          ports:
-            - "127.0.0.1:8642:8642"
-          cap_drop:
-            - NET_RAW
-            - NET_ADMIN
-            - SYS_ADMIN
-          security_opt:
-            - no-new-privileges
-          volumes:
-            - /home/${USER}/.hermes:/opt/data
-          environment:
-            HOME: /root
-            TERM: xterm-256color
-          env_file:
-            - /home/${USER}/.hermes/.env
-          healthcheck:
-            test: ["CMD", "curl", "-sf", "http://127.0.0.1:8642/health"]
-            interval: 30s
-            timeout: 10s
-            retries: 3
-            start_period: 30s
-          deploy:
-            resources:
-              limits:
-                memory: 2560M
-                cpus: "2.0"
-          networks:
-            - hermes-net
-
-        dashboard:
-          image: nousresearch/hermes-agent:latest
-          container_name: hermes-dashboard
-          restart: unless-stopped
-          command: dashboard --host 0.0.0.0
-          ports:
-            - "127.0.0.1:9119:9119"
-          cap_drop:
-            - ALL
-          security_opt:
-            - no-new-privileges
-          volumes:
-            - /home/${USER}/.hermes:/opt/data
-          environment:
-            GATEWAY_HEALTH_URL: "http://hermes:8642"
-          depends_on:
-            - hermes
-          deploy:
-            resources:
-              limits:
-                memory: 512M
-                cpus: "0.5"
-          networks:
-            - hermes-net
-
-      networks:
-        hermes-net:
-          driver: bridge
-
-  # NOTE: .env is NOT written via write_files (newlines get lost during
-  # shell heredoc expansion). It's written via runcmd printf instead.
-
-  # SOUL.md — Agent personality
-  - path: /home/${USER}/.hermes/SOUL.md
-    owner: ${USER}:${USER}
-    permissions: '0644'
-    content: |
-      # Hermes — Persönlicher AI-Assistent
-
-      Du bist Hermes, ein hilfreicher persönlicher AI-Assistent.
-      Du sprichst Deutsch und Englisch.
-
-      ## Fähigkeiten
-      - Smart Home Steuerung via Home Assistant (HA_URL und HA_TOKEN als Env-Vars)
-      - Grafana Solar-Dashboard Abfragen
-      - Tennisplatz-Buchung (Internet)
-      - Allgemeine Fragen und Aufgaben
-
-      ## Wichtig
-      - Du hast Netzwerkzugriff auf Home Assistant (192.168.178.88:8123) und Grafana (192.168.178.98:443)
-      - Nutze curl mit den Env-Vars \$HA_URL und \$HA_TOKEN für HA-API-Zugriffe
-      - Du läufst auf einer gesicherten Proxmox-VM mit eingeschränktem LAN-Zugang
-
-runcmd:
-  # Write .env via printf (cloud-init write_files loses newlines with heredoc vars)
-  - printf 'GLM_API_KEY=${ZAI_KEY}\nHA_URL=${HA_URL}\nHA_TOKEN=${HA_TOKEN}\nGRAFANA_URL=${GRAFANA_URL}\nTELEGRAM_BOT_TOKEN=${TELEGRAM_TOKEN}\nGATEWAY_ALLOW_ALL_USERS=true\n' > /home/${USER}/.hermes/.env
-  - chown ${USER}:${USER} /home/${USER}/.hermes/.env
-  - chmod 644 /home/${USER}/.hermes/.env
-
-  # Enable password auth for SSH (fallback if key injection fails)
-  - sed -i 's/^PasswordAuthentication no/PasswordAuthentication yes/' /etc/ssh/sshd_config 2>/dev/null || true
-  - bash -c "echo 'PasswordAuthentication yes' > /etc/ssh/sshd_config.d/99-allow-password.conf"
-  - systemctl restart sshd
-
-  # Disable IPv6 (prevent firewall bypass)
-  - sysctl -w net.ipv6.conf.all.disable_ipv6=1
-  - sysctl -w net.ipv6.conf.default.disable_ipv6=1
-  - echo "net.ipv6.conf.all.disable_ipv6 = 1" >> /etc/sysctl.d/99-disable-ipv6.conf
-  - echo "net.ipv6.conf.default.disable_ipv6 = 1" >> /etc/sysctl.d/99-disable-ipv6.conf
-
-  # Install Docker
-  - install -m 0755 -d /etc/apt/keyrings
-  - curl -fsSL https://download.docker.com/linux/debian/gpg -o /etc/apt/keyrings/docker.asc
-  - chmod a+r /etc/apt/keyrings/docker.asc
-  - echo "deb [arch=amd64 signed-by=/etc/apt/keyrings/docker.asc] https://download.docker.com/linux/debian bookworm stable" > /etc/apt/sources.list.d/docker.list
-  - apt-get update -qq
-  - apt-get install -y -qq docker-ce docker-ce-cli containerd.io docker-compose-plugin
-  - systemctl enable --now docker
-
-  # Create workspace
-  - mkdir -p /home/${USER}/workspace
-  - mkdir -p /home/${USER}/.hermes/sessions
-  - mkdir -p /home/${USER}/.hermes/memories
-  - mkdir -p /home/${USER}/.hermes/skills
-  - mkdir -p /home/${USER}/.hermes/cron
-  - mkdir -p /home/${USER}/.hermes/hooks
-  - mkdir -p /home/${USER}/.hermes/logs
-  - chown -R ${USER}:${USER} /home/${USER}
-
-  # Pull and start Hermes (first boot generates default config.yaml)
-  - su - ${USER} -c 'cd ~/hermes && docker compose pull --quiet'
-  - su - ${USER} -c 'cd ~/hermes && docker compose up -d'
-  - sleep 20
-
-  # Patch config.yaml: set Z.AI provider + model (after default config is generated)
-  - sed -i 's/default:.*"anthropic\/.*"/default: "glm-4.7"/' /home/${USER}/.hermes/config.yaml
-  - sed -i '0,/^  provider:/s/^  provider:.*/  provider: "zai"/' /home/${USER}/.hermes/config.yaml || true
-  - grep -q '^  provider:' /home/${USER}/.hermes/config.yaml || sed -i '/^model:/a\  provider: "zai"' /home/${USER}/.hermes/config.yaml
-
-  # Fix permissions (Docker container changes ownership)
-  - chown -R ${USER}:${USER} /home/${USER}/.hermes
-  - chmod -R u+rw /home/${USER}/.hermes
-  - chmod 755 /home/${USER}/.hermes
-  - chmod 644 /home/${USER}/.hermes/.env /home/${USER}/.hermes/config.yaml
-
-  # Restart hermes with correct config
-  - su - ${USER} -c 'cd ~/hermes && docker compose restart hermes'
-  - sleep 10
-
-  # Final permissions fix (Docker may have changed them again)
-  - chown -R ${USER}:${USER} /home/${USER}/.hermes
-  - chmod -R u+rw /home/${USER}/.hermes
-  - chmod 755 /home/${USER}/.hermes
-  - chmod 644 /home/${USER}/.hermes/.env /home/${USER}/.hermes/config.yaml
-
-  # Enable qemu-guest-agent
-  - systemctl enable --now qemu-guest-agent
-
-  # Signal completion
-  - echo "HERMES_SETUP_COMPLETE" > /tmp/setup-done
-USERDATA
-
-# Apply cloud-init
 qm set "$VM_ID" \
     --ciuser "$USER" \
+    --cipassword "$PASSWORD" \
+    --sshkeys "$SSH_PUBKEY_FILE" \
     --ipconfig0 "ip=${VM_IP}/24,gw=${GATEWAY}" \
     --nameserver "$GATEWAY" \
-    --cicustom "user=${SNIPPET_STORAGE}:snippets/hermes-${VM_ID}-userdata.yaml"
+    --searchdomain "local"
 
-ok "Cloud-init configured"
+ok "Cloud-init: user=$USER, IP=$VM_IP, SSH key + password auth"
 
 ###############################################################################
-# Step 4: Proxmox firewall
+# Step 4/8: Proxmox firewall
 ###############################################################################
 
-info "Step 4/7: Configuring Proxmox firewall..."
+info "Step 4/8: Preparing Proxmox firewall (disabled until setup completes)..."
 
-# Enable cluster firewall if not already
 CLUSTER_FW="/etc/pve/firewall/cluster.fw"
-if [[ -f "$CLUSTER_FW" ]]; then
-    if ! grep -q "^enable: 1" "$CLUSTER_FW"; then
-        sed -i 's/^enable:.*/enable: 1/' "$CLUSTER_FW" 2>/dev/null || \
-            echo -e "[OPTIONS]\nenable: 1\npolicy_in: ACCEPT\npolicy_out: ACCEPT" > "$CLUSTER_FW"
-    fi
-else
+if ! grep -q "^enable: 1" "$CLUSTER_FW" 2>/dev/null; then
     cat > "$CLUSTER_FW" << 'EOF'
 [OPTIONS]
 enable: 1
@@ -407,138 +190,341 @@ policy_in: ACCEPT
 policy_out: ACCEPT
 EOF
 fi
-ok "Cluster firewall enabled"
 
-# VM-specific firewall
+# Write firewall rules but keep DISABLED — enable after Phase 2
 cat > "/etc/pve/firewall/${VM_ID}.fw" << EOF
 [OPTIONS]
-enable: 1
+enable: 0
 dhcp: 1
 policy_in: DROP
 policy_out: DROP
 
 [RULES]
-# Allow outbound to gateway/router (internet routing + DNS)
 OUT ACCEPT -d ${GATEWAY}/32 -log nolog
 OUT ACCEPT -d ${GATEWAY}/32 -p udp -dport 53 -log nolog
 OUT ACCEPT -d ${GATEWAY}/32 -p tcp -dport 53 -log nolog
-
-# Erlaubte LAN-Ziele
-OUT ACCEPT -dest ${HA_IP} -dport ${HA_PORT} -p tcp -log nolog    # Home Assistant
-OUT ACCEPT -dest ${GRAFANA_IP} -dport ${GRAFANA_PORT} -p tcp -log nolog   # Grafana
-
-# Block all RFC1918 outbound (LAN isolation)
+OUT ACCEPT -dest ${HA_IP} -dport ${HA_PORT} -p tcp -log nolog
+OUT ACCEPT -dest ${GRAFANA_IP} -dport ${GRAFANA_PORT} -p tcp -log nolog
 OUT DROP -d 10.0.0.0/8 -log nolog
 OUT DROP -d 172.16.0.0/12 -log nolog
 OUT DROP -d 192.168.0.0/16 -log nolog
 OUT DROP -d 169.254.0.0/16 -log nolog
-
-# Allow all other outbound (internet)
 OUT ACCEPT -log nolog
-
-# Inbound: SSH from LAN only
 IN ACCEPT -source 192.168.178.0/24 -p tcp -dport 22 -log nolog
-
-# Inbound: ICMP
 IN ACCEPT -p icmp -log nolog
 EOF
 
-ok "Firewall configured for VM $VM_ID"
+ok "Firewall rules written (DISABLED until setup completes)"
 
 ###############################################################################
-# Step 5: Start VM
+# Step 5/8: Start VM
 ###############################################################################
 
-info "Step 5/7: Starting VM $VM_ID..."
+info "Step 5/8: Starting VM..."
+
+# Fix Docker iptables FORWARD DROP that blocks VM bridge traffic
+# Docker on Proxmox host sets FORWARD policy to DROP — must be removed!
+if iptables -L DOCKER-USER -n &>/dev/null; then
+    warn "Docker detected on Proxmox host — this blocks ALL VM network traffic!"
+    warn "Removing Docker from Proxmox host..."
+    systemctl stop docker docker.socket containerd 2>/dev/null || true
+    systemctl disable docker docker.socket containerd 2>/dev/null || true
+    apt purge -y docker-ce docker-ce-cli docker-buildx-plugin docker-compose-plugin docker-ce-rootless-extras containerd.io 2>/dev/null || true
+    apt autoremove -y 2>/dev/null || true
+    # Restore FORWARD chain
+    iptables -P FORWARD ACCEPT
+    iptables -F FORWARD 2>/dev/null || true
+    # Restart PVE firewall to restore proper rules
+    pve-firewall restart
+    ok "Docker removed from Proxmox host, firewall restored"
+fi
 
 qm start "$VM_ID"
 ok "VM $VM_ID started"
 
 ###############################################################################
-# Step 6: Wait for VM to boot and get IP
+# Step 6/8: Wait for boot (handle first-boot kernel panic)
 ###############################################################################
 
-info "Step 6/7: Waiting for VM to boot (this takes 3-5 minutes)..."
+info "Step 6/8: Waiting for VM to boot..."
+info "  (First boot may kernel panic — auto-recovery enabled)"
 
-MAX_WAIT=300
-ELAPSED=0
-while [[ $ELAPSED -lt $MAX_WAIT ]]; do
-    if ping -c 1 -W 2 "$VM_IP" &>/dev/null; then
-        ok "VM is responding at $VM_IP"
-        break
-    fi
-    sleep 5
-    ELAPSED=$((ELAPSED + 5))
-    printf "."
-done
-echo ""
+sleep 30
 
-if [[ $ELAPSED -ge $MAX_WAIT ]]; then
-    warn "VM did not respond within ${MAX_WAIT}s — it may still be booting"
-    warn "Check: qm guest cmd $VM_ID network-get-interfaces"
+# Check if VM crashed on first boot
+VM_STATUS=$(qm status "$VM_ID" 2>/dev/null | awk '{print $2}')
+if [[ "$VM_STATUS" == "stopped" ]]; then
+    warn "First-boot kernel panic detected — restarting VM..."
+    qm start "$VM_ID"
+    sleep 30
 fi
 
-# Wait for SSH
-info "Waiting for SSH..."
+# Poll for SSH with auto-reset
 ELAPSED=0
-while [[ $ELAPSED -lt 120 ]]; do
-    if ssh -o StrictHostKeyChecking=accept-new -o ConnectTimeout=3 \
-           -o BatchMode=yes "${USER}@${VM_IP}" "echo SSH_OK" 2>/dev/null | grep -q "SSH_OK"; then
+RESET_DONE=false
+while [[ $ELAPSED -lt 240 ]]; do
+    if $SSH_CMD "${USER}@${VM_IP}" "echo SSH_OK" 2>/dev/null | grep -q "SSH_OK"; then
         ok "SSH is ready"
         break
     fi
-    sleep 5
-    ELAPSED=$((ELAPSED + 5))
-done
 
-###############################################################################
-# Step 7: Wait for Docker + Hermes to be ready
-###############################################################################
-
-info "Step 7/7: Waiting for Hermes Agent to start..."
-
-ELAPSED=0
-MAX_WAIT=300
-while [[ $ELAPSED -lt $MAX_WAIT ]]; do
-    # Check if cloud-init is done
-    if ssh -o BatchMode=yes "${USER}@${VM_IP}" \
-           "test -f /tmp/setup-done && echo DONE" 2>/dev/null | grep -q "DONE"; then
-        ok "Cloud-init completed"
-
-        # Enable Proxmox NIC firewall now that DHCP/setup is done
-        CURRENT_MAC=$(qm config "$VM_ID" | grep -oP 'virtio=\K[0-9A-Fa-f:]+' | head -1)
-        if [[ -n "$CURRENT_MAC" ]]; then
-            qm set "$VM_ID" --net0 "virtio=${CURRENT_MAC},bridge=${BRIDGE},firewall=1"
-            ok "Proxmox NIC firewall enabled"
-        else
-            warn "Could not extract MAC — enable firewall manually:"
-            warn "  qm set $VM_ID --net0 'virtio=<MAC>,bridge=${BRIDGE},firewall=1'"
+    if [[ $ELAPSED -ge 90 ]] && [[ "$RESET_DONE" == "false" ]]; then
+        VM_STATUS=$(qm status "$VM_ID" 2>/dev/null | awk '{print $2}')
+        if [[ "$VM_STATUS" == "stopped" ]]; then
+            warn "VM stopped — doing clean shutdown + start..."
+            qm start "$VM_ID"
+            RESET_DONE=true
+            sleep 30
+        elif ! ping -c 1 -W 2 "$VM_IP" &>/dev/null; then
+            warn "VM not responding — doing clean stop + start..."
+            qm stop "$VM_ID" --timeout 10 2>/dev/null || qm reset "$VM_ID"
+            sleep 5
+            qm start "$VM_ID"
+            RESET_DONE=true
+            sleep 30
         fi
-
-        break
     fi
+
     sleep 10
     ELAPSED=$((ELAPSED + 10))
     printf "."
 done
 echo ""
 
-if [[ $ELAPSED -ge $MAX_WAIT ]]; then
-    warn "Cloud-init did not complete within ${MAX_WAIT}s"
-    warn "SSH in and check: sudo cloud-init status --long"
+# Final SSH check
+if ! $SSH_CMD "${USER}@${VM_IP}" "echo FINAL_OK" 2>/dev/null | grep -q "FINAL_OK"; then
+    fail "Cannot reach VM via SSH after 240s. Check Proxmox Console."
 fi
 
-# Wait for Hermes health endpoint
+# Wait for cloud-init to fully complete (including apt-get update/upgrade)
+info "  Waiting for cloud-init to finish (apt updates, 3-8 minutes)..."
 ELAPSED=0
-while [[ $ELAPSED -lt 120 ]]; do
-    if ssh -o BatchMode=yes "${USER}@${VM_IP}" \
-           "curl -sf http://127.0.0.1:8642/health" 2>/dev/null | grep -qi "ok\|healthy\|running"; then
+while [[ $ELAPSED -lt 600 ]]; do
+    CI_STATUS=$($SSH_CMD "${USER}@${VM_IP}" "cloud-init status 2>/dev/null | head -1" 2>/dev/null || echo "unknown")
+    if echo "$CI_STATUS" | grep -q "done"; then
+        ok "Cloud-init completed"
+        break
+    fi
+    sleep 15
+    ELAPSED=$((ELAPSED + 15))
+    printf "."
+done
+echo ""
+
+if [[ $ELAPSED -ge 600 ]]; then
+    warn "Cloud-init still running after 10min — proceeding anyway"
+fi
+
+###############################################################################
+# Step 7/8: Phase 2 — Install Docker + Hermes via SSH
+###############################################################################
+
+info "Step 7/8: Installing Docker + Hermes via SSH..."
+
+# --- 7a: Install Docker ---
+info "  [1/6] Installing Docker..."
+$SSH_CMD "${USER}@${VM_IP}" << 'DOCKER_INSTALL'
+set -e
+sudo install -m 0755 -d /etc/apt/keyrings
+sudo curl -fsSL https://download.docker.com/linux/debian/gpg -o /etc/apt/keyrings/docker.asc
+sudo chmod a+r /etc/apt/keyrings/docker.asc
+echo "deb [arch=amd64 signed-by=/etc/apt/keyrings/docker.asc] https://download.docker.com/linux/debian bookworm stable" | sudo tee /etc/apt/sources.list.d/docker.list >/dev/null
+sudo apt-get update -qq
+sudo apt-get install -y -qq docker-ce docker-ce-cli containerd.io docker-compose-plugin qemu-guest-agent jq curl
+sudo systemctl enable --now docker
+sudo systemctl enable --now qemu-guest-agent
+sudo usermod -aG docker $USER
+echo "DOCKER_OK"
+DOCKER_INSTALL
+ok "  Docker installed"
+
+# --- 7b: Create directories ---
+info "  [2/6] Creating directories..."
+$SSH_CMD "${USER}@${VM_IP}" "mkdir -p ~/hermes ~/workspace ~/.hermes/{sessions,memories,skills,cron,hooks,logs}"
+ok "  Directories created"
+
+# --- 7c: Write docker-compose.yml ---
+info "  [3/6] Writing docker-compose.yml..."
+$SSH_CMD "${USER}@${VM_IP}" "cat > ~/hermes/docker-compose.yml" << 'COMPOSE_EOF'
+services:
+  hermes:
+    image: nousresearch/hermes-agent:latest
+    container_name: hermes
+    restart: unless-stopped
+    command: gateway run
+    ports:
+      - "127.0.0.1:8642:8642"
+    cap_drop:
+      - NET_RAW
+      - NET_ADMIN
+      - SYS_ADMIN
+    security_opt:
+      - no-new-privileges
+    volumes:
+      - /home/hermes/.hermes:/opt/data
+    env_file:
+      - /home/hermes/.hermes/.env
+    healthcheck:
+      test: ["CMD", "curl", "-sf", "http://127.0.0.1:8642/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 30s
+    networks:
+      - hermes-net
+
+  dashboard:
+    image: nousresearch/hermes-agent:latest
+    container_name: hermes-dashboard
+    restart: unless-stopped
+    command: dashboard --host 0.0.0.0
+    ports:
+      - "127.0.0.1:9119:9119"
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges
+    volumes:
+      - /home/hermes/.hermes:/opt/data
+    environment:
+      GATEWAY_HEALTH_URL: "http://hermes:8642"
+    depends_on:
+      - hermes
+    networks:
+      - hermes-net
+
+networks:
+  hermes-net:
+    driver: bridge
+COMPOSE_EOF
+ok "  docker-compose.yml written"
+
+# --- 7d: Write .env ---
+info "  [4/6] Writing .env..."
+# Use printf over SSH to guarantee correct newlines (no heredoc expansion issues)
+$SSH_CMD "${USER}@${VM_IP}" "printf '%s\n' \
+  'GLM_API_KEY=${ZAI_KEY}' \
+  'HA_URL=${HA_URL}' \
+  'HA_TOKEN=${HA_TOKEN}' \
+  'GRAFANA_URL=${GRAFANA_URL}' \
+  'TELEGRAM_BOT_TOKEN=${TELEGRAM_TOKEN}' \
+  'GATEWAY_ALLOW_ALL_USERS=true' \
+  > ~/.hermes/.env && chmod 644 ~/.hermes/.env"
+ok "  .env written"
+
+# --- 7e: Write SOUL.md ---
+info "  [5/6] Writing SOUL.md..."
+$SSH_CMD "${USER}@${VM_IP}" "cat > ~/.hermes/SOUL.md" << 'SOUL_EOF'
+# Hermes — Personal AI Assistant
+
+Du bist Hermes, ein hilfreicher persoenlicher AI-Assistent.
+Du sprichst Deutsch und Englisch.
+
+## Capabilities
+- Smart Home control via Home Assistant (use $HA_URL and $HA_TOKEN env vars)
+- Grafana Solar Dashboard queries
+- Tennis court booking (TC Kleinberghofen, TC Erdweg)
+- General questions and tasks
+
+## Important
+- You HAVE network access to Home Assistant (192.168.178.88:8123) and Grafana (192.168.178.98:443)
+- Use curl with $HA_URL and $HA_TOKEN env vars for HA API calls
+- You run on a secured Proxmox VM with restricted LAN access
+SOUL_EOF
+ok "  SOUL.md written"
+
+# --- 7f: Pull, start, patch config ---
+info "  [6/6] Pulling and starting Hermes (2-3 minutes)..."
+$SSH_CMD "${USER}@${VM_IP}" << 'START_HERMES'
+set -e
+
+# Make .hermes writable by Docker container
+chmod -R 777 ~/.hermes
+
+# Pull and start
+sudo docker compose -f ~/hermes/docker-compose.yml pull --quiet
+sudo docker compose -f ~/hermes/docker-compose.yml up -d
+
+echo "Waiting 30s for Hermes to generate default config..."
+sleep 30
+
+# Patch config.yaml: set Z.AI provider + correct model name
+if [ -f ~/.hermes/config.yaml ]; then
+    # Fix model: must be plain "glm-4.7" (not "zai/glm-4.7" or "openai/...")
+    sed -i 's/default:.*"anthropic\/[^"]*"/default: "glm-4.7"/' ~/.hermes/config.yaml
+    sed -i 's/default:.*"openai\/[^"]*"/default: "glm-4.7"/' ~/.hermes/config.yaml
+    # Set provider to zai
+    sed -i '0,/^  provider:/s/^  provider:.*/  provider: "zai"/' ~/.hermes/config.yaml 2>/dev/null || true
+    grep -q '^  provider:' ~/.hermes/config.yaml || sed -i '/^model:/a\  provider: "zai"' ~/.hermes/config.yaml
+    # Set base_url to Z.AI endpoint
+    sed -i 's|base_url: "https://openrouter.ai/api/v1"|base_url: "https://api.z.ai/api/coding/paas/v4"|' ~/.hermes/config.yaml
+    echo "Config patched: model=glm-4.7, provider=zai, base_url=z.ai"
+else
+    echo "WARNING: config.yaml not yet generated"
+fi
+
+# Ensure permissions are wide open for Docker
+chmod -R 777 ~/.hermes
+
+# Restart with patched config
+sudo docker compose -f ~/hermes/docker-compose.yml restart hermes
+sleep 15
+
+# Verify
+echo "=== Container Status ==="
+sudo docker ps --format "table {{.Names}}\t{{.Status}}"
+echo ""
+echo "=== Config Check ==="
+grep -A3 "^model:" ~/.hermes/config.yaml 2>/dev/null | head -4
+echo ""
+echo "=== .env Check ==="
+head -2 ~/.hermes/.env
+echo ""
+echo "HERMES_SETUP_COMPLETE"
+START_HERMES
+ok "Hermes Agent deployed and configured"
+
+###############################################################################
+# Step 8/8: Enable NIC firewall + disable IPv6
+###############################################################################
+
+info "Step 8/8: Enabling firewall + finalizing security..."
+
+# Enable VM firewall now that setup is complete
+sed -i 's/^enable: 0/enable: 1/' "/etc/pve/firewall/${VM_ID}.fw"
+ok "VM firewall enabled"
+
+# Enable Proxmox NIC firewall
+CURRENT_MAC=$(qm config "$VM_ID" | grep -oP 'virtio=\K[0-9A-Fa-f:]+' | head -1)
+if [[ -n "$CURRENT_MAC" ]]; then
+    qm set "$VM_ID" --net0 "virtio=${CURRENT_MAC},bridge=${BRIDGE},firewall=1"
+    ok "Proxmox NIC firewall enabled"
+fi
+
+# Disable IPv6 inside VM
+$SSH_CMD "${USER}@${VM_IP}" << 'IPV6_DISABLE'
+sudo sysctl -w net.ipv6.conf.all.disable_ipv6=1 >/dev/null
+sudo sysctl -w net.ipv6.conf.default.disable_ipv6=1 >/dev/null
+echo "net.ipv6.conf.all.disable_ipv6 = 1" | sudo tee -a /etc/sysctl.d/99-disable-ipv6.conf >/dev/null
+echo "net.ipv6.conf.default.disable_ipv6 = 1" | sudo tee -a /etc/sysctl.d/99-disable-ipv6.conf >/dev/null
+echo "IPv6 disabled"
+IPV6_DISABLE
+ok "IPv6 disabled"
+
+# Final health check
+info "Final health check..."
+ELAPSED=0
+while [[ $ELAPSED -lt 60 ]]; do
+    if $SSH_CMD "${USER}@${VM_IP}" "curl -sf http://127.0.0.1:8642/health" 2>/dev/null; then
+        echo ""
         ok "Hermes Agent is healthy!"
         break
     fi
     sleep 10
     ELAPSED=$((ELAPSED + 10))
 done
+
+GW_TOKEN=$($SSH_CMD "${USER}@${VM_IP}" "grep auth_token ~/.hermes/config.yaml 2>/dev/null | head -1 | awk '{print \$2}' | tr -d '\"'" 2>/dev/null || echo "check config.yaml")
 
 ###############################################################################
 # Summary
@@ -553,36 +539,30 @@ echo "  VM ID:          $VM_ID"
 echo "  VM IP:          $VM_IP"
 echo "  User:           $USER"
 echo "  Password:       $PASSWORD"
+echo "  Disk:           ${DISK}GB"
 echo "  SSH:            ssh ${USER}@${VM_IP}"
 echo ""
-echo "  Gateway API:    http://127.0.0.1:8642 (loopback only)"
+echo "  Gateway API:    http://127.0.0.1:8642 (via SSH tunnel)"
+echo "  Dashboard:      http://127.0.0.1:9119 (via SSH tunnel)"
 echo "  Gateway Token:  $GW_TOKEN"
-echo "  Dashboard:      http://127.0.0.1:9119 (loopback only)"
 echo ""
 echo "  SSH Tunnel (from Windows):"
 echo "    ssh -i C:\\Users\\bvogel\\.ssh\\id_ed25519_openclaw \\"
 echo "        -L 8642:localhost:8642 -L 9119:localhost:9119 \\"
 echo "        ${USER}@${VM_IP}"
 echo ""
-echo "  Then open: http://localhost:9119 (Dashboard)"
-echo "             http://localhost:8642 (API)"
-echo ""
 if [[ -n "$TELEGRAM_TOKEN" ]]; then
-    echo "  Telegram:       Bot configured (restart gateway if not connecting)"
+    echo "  Telegram:       Configured"
 else
-    echo "  Telegram:       Not configured — set later with:"
-    echo "    ssh ${USER}@${VM_IP}"
-    echo "    nano ~/.hermes/.env  # Add: TELEGRAM_BOT_TOKEN=your-token"
-    echo "    cd ~/hermes && docker compose restart hermes"
+    echo "  Telegram:       Not set — add TELEGRAM_BOT_TOKEN to ~/.hermes/.env"
 fi
 echo ""
-echo "  Firewall:       LAN blocked except HA + Grafana"
+echo "  Firewall:"
 echo "    ✅ ${HA_IP}:${HA_PORT} (Home Assistant)"
 echo "    ✅ ${GRAFANA_IP}:${GRAFANA_PORT} (Grafana)"
 echo "    ❌ Rest of 192.168.178.0/24"
 echo "    ✅ Internet"
 echo ""
 echo -e "${GREEN}═══════════════════════════════════════════════════${NC}"
-echo ""
-echo "  ⚠️  SAVE these credentials! They won't be shown again."
-echo ""
+echo -e "${YELLOW}  ⚠️  SAVE the password: ${PASSWORD}${NC}"
+echo -e "${GREEN}═══════════════════════════════════════════════════${NC}"
