@@ -607,16 +607,36 @@ by firewall to only accept connections from OpenClaw (.80) and Hermes (.81).
 
 ---
 
-## Option 5: e-Invoice LXC (Batch Invoicing)
+## Option 5: e-Invoice LXC (Batch Invoicing) ✅ Tested
 
 **Best for**: Running the e-Invoice application as a Docker batch job with
-NAS access via NFS.
+NAS access via NFS. Generates PDF invoices from Excel input, sends via email.
 
 ### Prerequisites
 
-- Synology NAS with NFS enabled on the `praxis` share
-- GitHub PAT for the private repo
-- KeePassXC master password
+- Synology NAS (`brain`) with NFS enabled on the `praxis` share
+  - NFS permissions for both **Proxmox host IP** (.108) and **LXC IP** (.83)
+  - Squash: "Map all users to admin" (required for unprivileged LXC UID mapping)
+- GitHub PAT for the private repo (used once during clone, then removed)
+- KeePassXC master password (for credentials database on NAS)
+
+### NAS Setup (Synology DSM)
+
+1. **Create service account**: Control Panel → User & Group → Create `svc-invoicing`
+   - Permissions: `praxis` share = Read/Write, all others = No Access
+   - Applications: Deny all (DSM, File Station, etc.)
+
+2. **Enable NFS**: Control Panel → File Services → NFS → Enable
+
+3. **Add NFS rule**: Shared Folder → `praxis` → Edit → NFS Permissions → Create
+   - Hostname/IP: `192.168.178.108` (Proxmox host — does the actual NFS mount)
+   - Also add: `192.168.178.83` (LXC IP — for future flexibility)
+   - Privilege: Read/Write
+   - Squash: Map all users to admin
+   - Security: sys
+   - Enable async: Yes, Allow non-privileged ports: Yes
+
+4. **Find the export path**: `showmount -e 192.168.178.74` (typically `/volume8/praxis`)
 
 ### Step-by-Step
 
@@ -630,27 +650,49 @@ sed -i 's/\r$//' /root/setup-einvoice-lxc.sh
     --ssh-pubkey ~/.ssh/id_ed25519.pub \
     --keepass-pw "YourKeePassMasterPassword" \
     --github-pat "ghp_xxxx" \
-    --nas-ip 192.168.178.74
+    --nas-ip 192.168.178.74 \
+    --nas-export /volume8/praxis
 ```
 
 The script:
-- Mounts NAS via NFS on the Proxmox host, bind-mounts into the LXC
+- Mounts NAS via NFS on the **Proxmox host** (unprivileged LXCs can't mount NFS)
+- Bind-mounts into LXC via `pct set -mp0` (persists across reboots)
 - Creates LXC 103 (IP .83) with Docker
-- Clones the private repo, copies fonts from NAS, builds Docker image
+- Clones the private repo, copies Century Gothic fonts from NAS, builds Docker image
 - Creates convenience commands: `invoice` and `invoice-update`
+- Verifies NAS read+write access from inside LXC
 
 ### Usage
 
 ```bash
-# Generate April 2026 invoices (draft)
-ssh root@192.168.178.83 invoice --year 2026 --month 4
+# Generate April 2026 invoices (draft mode)
+pct enter 103
+cd /opt/e-invoice/e-Invoice
+docker compose run --rm e-invoice \
+    --journal /data/praxis/Rechnungen/2026/Rechnungsliste_2026.xlsx \
+    --session SaaS_LXC --config config \
+    --year 2026 --month 4 -dr -u
 
-# Fire & forget (sends emails)
-ssh root@192.168.178.83 invoice --year 2026 --month 4 --fireforget --prodrun
+# Fire & forget (sends emails directly)
+docker compose run --rm e-invoice \
+    --journal /data/praxis/Rechnungen/2026/Rechnungsliste_2026.xlsx \
+    --session SaaS_LXC --config config \
+    --year 2026 --month 4 --fireforget --prodrun
 
 # Update code + rebuild
-ssh root@192.168.178.83 invoice-update
+cd /opt/e-invoice && git pull && cd e-Invoice && docker compose build
 ```
+
+### Troubleshooting
+
+| Problem | Cause | Fix |
+|---------|-------|-----|
+| `mount.nfs: access denied` | NFS permissions missing for PVE host IP | Add `.108` to NFS rules on NAS |
+| `"/\|\|": not found` during build | Dockerfile `COPY ... 2>/dev/null` | Fixed: COPY is not a shell cmd |
+| `ImportError: libtk8.6.so` | tkinter imported at module level | Fixed: lazy import in Python code |
+| Docker FORWARD chain on host | Setup script ran Docker install on host | Remove with `iptables -F/-X DOCKER*` |
+| NAS writable but not from LXC | UID mapping (unprivileged LXC) | NAS squash: "Map all users to admin" |
+| `ping: Operation not permitted` | Docker needs NET_RAW capability | `cap_add: [NET_RAW]` in compose |
 
 ---
 

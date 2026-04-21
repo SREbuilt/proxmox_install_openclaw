@@ -617,3 +617,89 @@ qm guest cmd 100 network-get-interfaces | jq '.'
 sudo cloud-init status
 ip addr show
 ```
+
+---
+
+## e-Invoice LXC Management (LXC 103)
+
+### Access
+
+```bash
+# From Proxmox host (preferred — SSH key may not be configured)
+pct enter 103
+
+# Working directory
+cd /opt/e-invoice/e-Invoice
+```
+
+### Running Invoices
+
+```bash
+# Draft mode (preview, no emails sent)
+docker compose run --rm e-invoice \
+    --journal /data/praxis/Rechnungen/2026/Rechnungsliste_2026.xlsx \
+    --session SaaS_LXC --config config \
+    --year 2026 --month 4 -dr -u
+
+# Production run (sends emails)
+docker compose run --rm e-invoice \
+    --journal /data/praxis/Rechnungen/2026/Rechnungsliste_2026.xlsx \
+    --session SaaS_LXC --config config \
+    --year 2026 --month 4 --fireforget --prodrun
+```
+
+### Update Code + Rebuild
+
+```bash
+cd /opt/e-invoice && git pull && cd e-Invoice && docker compose build
+```
+
+> **Hinweis:** `git pull` benötigt GitHub-Credentials (PAT wurde aus
+> Sicherheitsgründen vom Remote entfernt). Entweder PAT temporär setzen:
+> ```bash
+> git remote set-url origin https://TOKEN@github.com/SREbuilt/Python.git
+> git pull
+> git remote set-url origin https://github.com/SREbuilt/Python.git
+> ```
+
+### NAS Mount prüfen
+
+```bash
+# Vom Proxmox host
+mount | grep nas-praxis
+
+# Innerhalb der LXC
+ls /nas/praxis/Rechnungen/
+touch /nas/praxis/.write-test && rm /nas/praxis/.write-test && echo "WRITE_OK"
+```
+
+### Docker Management
+
+```bash
+# Container-Status
+docker compose ps
+
+# Logs anzeigen
+docker compose logs e-invoice
+
+# Image neubauen (nach Code-Änderungen)
+docker compose build
+
+# Alle Images aufräumen
+docker image prune -f
+```
+
+### .env verwalten
+
+```bash
+# Anzeigen
+cat /opt/e-invoice/e-Invoice/.env
+
+# Bearbeiten
+nano /opt/e-invoice/e-Invoice/.env
+
+# Variablen:
+# KEEPASSXC_MASTER_PASSWORD=...   (Pflicht)
+# OTEL_EXPORTER_OTLP_ENDPOINT=... (Optional, für SigNoz)
+# NAS_MOUNT=/nas/praxis            (Standard)
+```

@@ -12,7 +12,7 @@
 #
 #   ┌─────────────┐  NFS   ┌──────────────┐  bind-mount  ┌──────────────┐
 #   │ NAS "brain"  │───────►│ PVE host     │─────────────►│ LXC 103      │
-#   │ /volume1/... │        │ /mnt/nas-... │              │ /nas/praxis  │
+#   │ /volume8/... │        │ /mnt/nas-... │              │ /nas/praxis  │
 #   └─────────────┘        └──────────────┘              │  └─ Docker   │
 #                                                         │    /data/... │
 #                                                         └──────────────┘
@@ -27,7 +27,7 @@
 # Optional:
 #       --ct-id 103  --ct-ip 192.168.178.83  --gateway 192.168.178.1
 #       --ram 2048   --disk 16  --bridge vmbr0  --password "PASS"
-#       --nas-export /volume1/praxis  --otel-endpoint http://host:4317
+#       --nas-export /volume8/praxis  --otel-endpoint http://host:4317
 #
 # Prerequisites: Proxmox VE 8.x+, NAS reachable via NFS
 ###############################################################################

@@ -679,6 +679,18 @@ history -c && rm -f ~/.bash_history
 | NFS direkt in unprivilegierten LXC | Fehlende Kernel-Capabilities |
 | `soft` NFS-Mount für Geschäftsdaten | Stiller Datenverlust bei Netzwerkproblemen |
 | Nur Lesetest nach NFS-Mount | UID-Mapping-Probleme erst beim Schreiben sichtbar |
+| NFS-Regel nur für LXC-IP | PVE-Host mountet NFS, nicht die LXC — beide IPs nötig |
+| `/volume1/praxis` annehmen | Synology-Volume kann anders sein — `showmount -e` nutzen |
+
+### Dockerfile/Docker Compose
+
+| Anti-Pattern | Warum es scheitert |
+|-------------|-------------------|
+| `COPY ... 2>/dev/null \|\| true` | COPY ist kein Shell-Befehl, `\|\|` wird als Dateiname interpretiert |
+| `import tkinter` in headless Container | libtk nicht installiert → ImportError beim Modulstart |
+| `ping` ohne `cap_add: [NET_RAW]` | Docker-Default entfernt NET_RAW → ping scheitert |
+| `iputils-ping` nicht im Image | `python:slim` enthält kein ping |
+| Docker iptables-Chains nach Deinstallation | Chains bleiben in Kernel — manuell `iptables -F/-X` nötig |
 
 ### Boot/Kernel
 
@@ -704,3 +716,9 @@ history -c && rm -f ~/.bash_history
 | 8 | .env chmod 600 → Container Permission denied | Container startet nicht | 1 Iteration |
 | 9 | OpenClaw SSRF blockiert Whisper | Audio-Transcription fehlschlägt | 2 Iterationen |
 | 10 | NFS soft mount → Datenverlust-Risiko | Code Review | Sofort behoben |
+| 11 | NFS Export-Pfad /volume1 vs /volume8 | `mount.nfs: access denied` | `showmount -e` zeigt richtigen Pfad |
+| 12 | NFS-Regel nur für LXC-IP, nicht PVE-Host | `mount.nfs: access denied` | Host (.108) mountet, nicht LXC (.83) |
+| 13 | Dockerfile `COPY ... 2>/dev/null \|\| true` | `"/\|\|": not found` | COPY ist kein Shell-Befehl |
+| 14 | `import tkinter` in headless Docker | `ImportError: libtk8.6.so` | Lazy import mit `try/except` |
+| 15 | Docker `ping` ohne NET_RAW | `Operation not permitted` | `cap_add: [NET_RAW]` in compose |
+| 16 | Docker iptables-Chains als Host-Überbleibsel | DOCKER-USER Chain blockiert FORWARD | `iptables -F/-X DOCKER*` manuell |
