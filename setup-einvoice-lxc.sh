@@ -205,7 +205,7 @@ pct create "$CT_ID" "$TEMPLATE_PATH" \
     --ssh-public-keys "$SSH_PUBKEY_FILE" \
     --unprivileged 1 \
     --features nesting=1,keyctl=1 \
-    --onboot 0 \
+    --onboot 1 \
     --start 0
 
 ok "LXC $CT_ID created (${DISK}GB disk, unprivileged)"
